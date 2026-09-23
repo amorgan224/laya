@@ -74,6 +74,80 @@ def export_to_onnx(model_id_or_path: str, output_path: str):
     
     print(f"Successfully exported ONNX model to: {output_path}")
 
+F = TypeVar("F", bound=Callable)
+
+def retry_with_backoff(
+    max_attempts: int = 3,
+    exceptions: Tuple[type[BaseException], ...] = (Exception,),
+    base_delay: float = 1.0,
+    max_delay: float = 60.0,
+    jitter: bool = True,
+    on_retry: Optional[Callable[[BaseException, int], None]] = None
+) -> Callable[[F], F]:
+    """
+    Retry a function with exponential backoff.
+
+    Args:
+        max_attempts: Total number of attempts before re-raising the last error.
+        exceptions: Tuple of exceptions to catch and retry on.
+        base_delay: Initial delay in seconds.
+        max_delay: Cap on delay between retries.
+        jitter: If True, add random jitter to avoid thundering herd.
+        on_retry: Optional callback invoked with (exception, attempt_number).
+    """
+    def decorator(func: F) -> F:
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception: Optional[BaseException] = None
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as exc:
+                    last_exception = exc
+                    if attempt == max_attempts:
+                        break
+
+                    delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+                    if jitter:
+                        delay = random.uniform(0, delay)
+
+                    logging.warning(
+                        "%s failed (attempt %d/%d): %s. Retrying in %.2fs...",
+                        func.__name__, attempt, max_attempts, exc, delay
+                    )
+
+                    if on_retry:
+                        on_retry(exc, attempt)
+
+                    time.sleep(delay)
+
+            raise last_exception  # type: ignore
+
+        return wrapper  # type: ignore
+
+    return decorator
+
+
+# ─── Example usage ───
+
+@retry_with_backoff(
+    max_attempts=4,
+    exceptions=(ConnectionError, TimeoutError),
+    base_delay=0.5
+)
+def call_flaky_api(endpoint: str) -> dict:
+    """Simulate a call that sometimes fails."""
+    if random.random() < 0.7:
+        raise ConnectionError(f"Failed to reach {endpoint}")
+    return {"status": "ok", "endpoint": endpoint}
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    result = call_flaky_api("https://api.example.com/data")
+    print(result)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export a Laya model to ONNX format")
     parser.add_argument("--model", type=str, default="convaiinnovations/laya", help="HuggingFace Hub ID or local path")
